@@ -4,6 +4,7 @@ import pandas as pd
 import time
 import matplotlib.pyplot as plt
 from scipy.sparse.linalg.eigen.arpack import eigsh
+import math
 
 
 def load_data(N_users, n_rows):
@@ -27,7 +28,6 @@ def construct_cooccurence_matrix(seq, L, w, command_dict):
 			y = command_dict[seq[i]]
 			m[x, y] += 1
 
-
 	return m
 
 def calculate_mean(matrices):
@@ -44,22 +44,82 @@ def convert_to_vector(m):
 
 def construct_covariance_matrix(matrices):
 	vec_mat = np.matrix(matrices)
-	return np.dot(vec_mat, vec_mat.T)
+	return np.dot(vec_mat.T, vec_mat)
 
 def get_most_common(data):
 	data = pd.DataFrame(data)
-	most_freq = data[0].value_counts()[:200]
+	most_freq = data[0].value_counts()[:80]
 	most_freq = pd.DataFrame(most_freq.index) # Outch that's ugly :(
 	most_freq = most_freq.to_dict()[0]
 	most_freq = {v: k for k, v in most_freq.items()} # :(((
 	return most_freq
 
+def eigen_cooccur_from_vec(vec):
+	#print(len(vec))
+	return np.reshape(vec, (int(math.sqrt(len(vec))), int(math.sqrt(len(vec)))))
+
+def compute_network(F, eigenmatrices):
+	net = np.zeros(eigenmatrices[0].shape)
+	for i in range(len(F)):
+		adjacency = np.multiply(F[i], eigenmatrices[i])
+		positive_layer = np.maximum(adjacency, 0)
+		net = np.add(net, positive_layer)
+	return net
+
+def test_for_user(index, most_freq, test_seq, n_seq, N, eigenVectors, eigenmatrices):
+
+	test_seq_user = [test_seq[(index-1)*n_seq + i] for i in range(n_seq)]
+
+	print("[+] Constructing co-occurence matrices")
+	test_comatrices = []
+	t1 = time.time()
+	for i in range(len(test_seq_user)):
+		m = construct_cooccurence_matrix(test_seq_user[i], 100, 7, most_freq)
+		test_comatrices.append(m)
+	t2 = time.time()
+	print("[+] Done constructing co-occurence matrices in " + str(t2 - t1) + " seconds")
+
+	print("[+] Unfolding matrices")
+	A_test = []
+	t1 = time.time()
+	for i in range(len(test_comatrices)):
+			A_test.append(convert_to_vector(test_comatrices[i]))
+	t2 = time.time()
+	print("[+] Done unfolding matrices in " + str(t2 - t1) + " seconds")
+
+	print("[+] Calculating feature vectors")
+	t1 = time.time()
+	features_vec_test = []
+	for i in range(len(A_test)):
+		F = []
+		for j in range(N):
+			f = np.dot(eigenVectors[:,j].T, A_test[i])
+			F.append(f)
+		features_vec_test.append(F)
+	t2 = time.time()
+	print("[+] Done calculating feature vectors in " + str(t2 - t1) + " seconds")
+
+	print("[+] Computing networks")
+	t1 = time.time()
+	networks = []
+	for i in range(len(A)):
+		net = compute_network(features_vec_test[i], eigenmatrices)
+		networks.append(net)
+	t2 = time.time()
+	print("[+] Done computing networks in " + str(t2 - t1) + " seconds")
+
+	return networks
+
 
 if __name__ == '__main__':
 
-	N_users = 50
+	N_users = 1
 	n_rows = 15000
 	L = 100
+	n_train = 5000
+	n_train_seq = min(n_train, n_rows) // L
+	n_seq_user = n_rows // L
+	n_test_user = n_seq_user - n_train_seq
 
 	print("[+] Loading data")
 	users = load_data(N_users, n_rows)
@@ -77,6 +137,16 @@ if __name__ == '__main__':
 			seqs.append((users[i][offset*L:(offset + 1)*L][0].tolist()))
 			offset += 1
 	print("[+] Done constructing sequences")
+
+	train_seq = []
+	offset = 0
+	for i in range(N_users):
+		for j in range(n_train_seq):
+			train_seq.append(seqs.pop(i*n_seq_user + j - offset))
+			offset += 1
+
+	test_seq = seqs
+	seqs = train_seq
 
 	most_freq = get_most_common(tot)
 
@@ -118,7 +188,8 @@ if __name__ == '__main__':
 
 	print("[+] Computing and sorting eingenvalues and eigenvectors")
 	t1 = time.time()
-	eigenValues, eigenVectors = eigsh(cov, 200, which="LM")
+	#eigenValues, eigenVectors = eigsh(cov, 200, which="LM")
+	eigenValues, eigenVectors = scl.eig(cov)
 
 	idx = eigenValues.argsort()[::-1]   
 	eigenValues = eigenValues[idx]
@@ -130,17 +201,52 @@ if __name__ == '__main__':
 	t1 = time.time()
 	sum_eigen = np.sum(eigenValues)
 	rates = []
+	N = len(eigenValues)
 	for i in range(len(eigenValues)):
 		rate = 0
 		for j in range(i):
 			rate += eigenValues[j]
 		rate /= sum_eigen
-		rates.append(rate)
+		rates.append(np.real(rate))
+		if rate > 0.90:
+			N = i
 
 	plt.plot(rates)
 	t2 = time.time()
 	print("[+] Done plotting contribution rate in " + str(t2 - t1) + " seconds")
-	plt.show()
+	#plt.show()
 
-	
-	
+	print("[+] Calculating feature vectors")
+	t1 = time.time()
+	features_vec = []
+	for i in range(len(A)):
+		F = []
+		for j in range(N):
+			f = np.dot(eigenVectors[:,j].T, A[i])
+			F.append(f)
+		features_vec.append(F)
+	t2 = time.time()
+	print("[+] Done calculating feature vectors in " + str(t2 - t1) + " seconds")
+
+	print("[+] Constructing eigenmatrices")
+	eigenmatrices = []
+	t1 = time.time()
+	for i in range(len(eigenVectors[:N])):
+		eigenmatrices.append(eigen_cooccur_from_vec(eigenVectors[i]))
+	t2 = time.time()
+	print("[+] Done constucting eigenmatrices in " + str(t2 - t1) + " seconds")
+
+	print("[+] Computing networks")
+	t1 = time.time()
+	networks = []
+	for i in range(len(A)):
+		net = compute_network(features_vec[i], eigenmatrices)
+		networks.append(net)
+	t2 = time.time()
+	print("[+] Done computing networks in " + str(t2 - t1) + " seconds")
+
+
+
+
+	print("\n[+] Now moving on to test cases")
+	user_nets = test_for_user(1, most_freq, test_seq, n_test_user, N, eigenVectors, eigenmatrices)
